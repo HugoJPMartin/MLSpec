@@ -1,4 +1,4 @@
-import os
+import os, traceback
 from os import listdir
 from os.path import isfile, join
 import json
@@ -8,6 +8,7 @@ import sys, os
 import pandas as pd
 import numpy as np
 from sklearn import tree
+from sklearn import ensemble
 from sklearn.model_selection import ShuffleSplit
 from sklearn.model_selection import StratifiedShuffleSplit
 from sklearn.model_selection import cross_val_predict
@@ -25,8 +26,8 @@ class MLSpec:
     
     def __init__(self, name=None, dataset=None, resultsPath=None, learningType=None, perf="perf", graphPath=None, nbThresholds=20, nbFolds = 10, minSampleSize=2, maxSampleSize=None, paceSampleSize=None, hyperparams=None, percentageThresholds=None):
         
-        if not learningType in ["classification", "regression"] and not learningType.startswith("multiclass-") :
-            raise Exception("Type must be classification, regression or multiclass")
+        if not learningType in ["classification", "regression", "gbClassification", "gbRegression", "rfClassification", "rfRegression"] and not learningType.startswith("multiclass-") :
+            raise Exception("Type must be classification, regression, gbClassification, gbRegression, rfClassification, rfRegression, or multiclass")
         
         self.setDataset(dataset)
             
@@ -76,40 +77,56 @@ class MLSpec:
             raise Exception('minSampleSize cannot be less than 2')
             
         if learningType == "classification" or learningType.startswith("multiclass-"):
-            if hyperparams == None:
-                self.hyperparams = {
-                    "criterion":"gini",
-                    "splitter":"best",
-                    "max_features":None,
-                    "max_depth":None,
-                    "min_samples_split":2,
-                    "min_samples_leaf":1,
-                    "min_weight_fraction_leaf":0.,
-                    "max_leaf_nodes":None,
-                    "class_weight":None,
-                    "random_state":None,
-                    "min_impurity_decrease":1e-7,
-                    "presort":False
-                }
-            else:
-                self.hyperparams = hyperparams
+            self.hyperparams = {
+                "criterion":"gini",
+                "splitter":"best",
+                "max_features":None,
+                "max_depth":None,
+                "min_samples_split":2,
+                "min_samples_leaf":1,
+                "min_weight_fraction_leaf":0.,
+                "max_leaf_nodes":None,
+                "class_weight":None,
+                "random_state":None,
+                "min_impurity_decrease":1e-7,
+                "presort":False
+            }
+        if learningType == "gbClassification" or learningType == "gbRegression":
+            self.hyperparams = {
+                "criterion":"friedman_mse",
+                "loss":"deviance",
+                "learning_rate":0.1,
+                "n_estimators":100,
+                "subsample":1.0,
+                "max_features":None,
+                "max_depth":None,
+                "min_samples_split":2,
+                "min_samples_leaf":1,
+                "min_weight_fraction_leaf":0.,
+                "max_leaf_nodes":None,
+                "random_state":None,
+                "min_impurity_decrease":1e-7,
+                "presort":False
+            }
         elif learningType == "regression":
-            if hyperparams == None:
-                self.hyperparams =  {
-                    "criterion":"mse",
-                    "splitter":"best",
-                    "max_depth":None,
-                    "min_samples_split":2,
-                    "min_samples_leaf":1,
-                    "min_weight_fraction_leaf":0.,
-                    "max_features":None,
-                    "random_state":None,
-                    "max_leaf_nodes":None,
-                    "min_impurity_decrease":1e-7,
-                    "presort":False
-                }
-            else:
-                self.hyperparams = hyperparams
+            self.hyperparams =  {
+                "criterion":"mse",
+                "splitter":"best",
+                "max_depth":None,
+                "min_samples_split":2,
+                "min_samples_leaf":1,
+                "min_weight_fraction_leaf":0.,
+                "max_features":None,
+                "random_state":None,
+                "max_leaf_nodes":None,
+                "min_impurity_decrease":1e-7,
+                "presort":False
+            }
+            
+        if not hyperparams == None:
+            for k,v in hyperparams.items():
+                if k in self.hyperparams:
+                    self.hyperparams[k] = v
             
     @classmethod
     def from_results(cls, resultsFile):
@@ -153,7 +170,6 @@ class MLSpec:
 
         res = []
         threads=[]
-        #for sr in range(1,99):
         for sr in range(self.minSampleSize, self.maxSampleSize, self.paceSampleSize):
             for t in thresholds:
                 
@@ -177,8 +193,13 @@ class MLSpec:
             TN = TP = FN = FP = 0 # Counters for classification results
 
             clean = d.drop(["perf"],axis=1,errors="ignore")
-
-            c = tree.DecisionTreeClassifier(**self.hyperparams)
+            
+            if self.learningType == "classification":
+                c = tree.DecisionTreeClassifier(**self.hyperparams)
+            elif self.learningType == "gbClassification":
+                c = ensemble.GradientBoostingClassifier(**self.hyperparams)
+            elif self.learningType == "rfClassification":
+                c = ensemble.RandomForestClassifier(**self.hyperparams)
 
             try:
                 for train_index, test_index in shuffle_split.split(clean,clean.label):
@@ -189,6 +210,89 @@ class MLSpec:
                     dfTemp["label"] = clean.label.iloc[test_index]
                     dfTemp["pred"] = pred
 
+                    TN += dfTemp[(dfTemp.label == 0) & (dfTemp.pred == 0)].shape[0]
+                    TP += dfTemp[(dfTemp.label == 1) & (dfTemp.pred == 1)].shape[0]
+                    FN += dfTemp[(dfTemp.label == 1) & (dfTemp.pred == 0)].shape[0]
+                    FP += dfTemp[(dfTemp.label == 0) & (dfTemp.pred == 1)].shape[0]
+
+            except Exception as e:
+                if str(e).find("y contains 1 class after sample_weight trimmed classes with zero weights, while a minimum of 2 classes are required.") == -1:
+                    print(traceback.format_exc())
+                    print(e)
+
+            return {
+                "sr":sr,
+                "t":t,
+                "TN":TN/self.nbFolds,
+                "TP":TP/self.nbFolds,
+                "FN":FN/self.nbFolds,
+                "FP":FP/self.nbFolds,
+            }
+        except Exception as e:
+            print(traceback.format_exc())
+            print(e)
+        
+
+        
+    def _mlRegression(self):
+        
+        perf = self.perf
+        d = self.dataset
+        d = d.sort_values(by=perf) # Sort it by perf to get threshold values
+        thresholds = [d[perf].iloc[i * d.shape[0]//self.nbThresholds] for i in range(1, self.nbThresholds)]
+        
+        if not self.percentageThresholds == None:
+            thresholds=[d[perf].quantile(th) for th in self.percentageThresholds]
+
+        res = []
+        threads=[]
+        #for sr in range(1,99):
+        for sr in range(self.minSampleSize, self.maxSampleSize, self.paceSampleSize):
+            for t in thresholds:
+                
+                threads.append( MLThread(target=self._mlRegressionThread, args=(d, perf, sr, t)) )
+                
+        for t in threads:
+            t.start()
+            
+        for t in threads:
+            res.append(t.join())
+        
+        self.dfResults = pd.DataFrame(res)
+        
+    def _mlRegressionThread(self, dataset, perf, sr, t):
+        shuffle_split = StratifiedShuffleSplit(train_size=sr, n_splits=self.nbFolds)
+        d = dataset.copy()
+        try:
+            d["label"] = 0
+            d.loc[d[perf] > t, "label"] = 1
+
+            TN = TP = FN = FP = MAE = MSE = 0 # Counters for regression results
+
+            clean = d.drop(["perf"],axis=1,errors="ignore")
+
+            if self.learningType == "regression":
+                c = tree.DecisionTreeRegressor(**self.hyperparams)
+            elif self.learningType == "gbRegression":
+                c = ensemble.GradientBoostingRegressor(**self.hyperparams)
+            elif self.learningType == "rfRegression":
+                c = ensemble.RandomForestRegressor(**self.hyperparams)
+
+            try:
+                for train_index, test_index in shuffle_split.split(clean,clean.label):
+                    c.fit(clean.drop(["label"],axis=1).iloc[train_index], clean.label.iloc[train_index])
+                    pred = c.predict(clean.drop(["label"],axis=1).iloc[test_index])
+
+                    dfTemp = pd.DataFrame()
+                    dfTemp[perf] = d[perf].iloc[test_index]
+                    dfTemp["pred"] = pred
+                    dfTemp["label"] = d.label.iloc[test_index]
+                    dfTemp["label_pred"] = 0
+                    dfTemp.loc[dfTemp["pred"] > t, "label_pred"] = 1
+
+                    MSE += mse(dfTemp[perf],dfTemp["pred"])
+                    
+                    MAE += mae(dfTemp[perf],dfTemp["pred"])
                     TN += dfTemp[(dfTemp.label == 0) & (dfTemp.pred == 0)].shape[0]
                     TP += dfTemp[(dfTemp.label == 1) & (dfTemp.pred == 1)].shape[0]
                     FN += dfTemp[(dfTemp.label == 1) & (dfTemp.pred == 0)].shape[0]
@@ -207,72 +311,6 @@ class MLSpec:
             }
         except Exception as e:
             print(e)
-        
-        
-    def _mlRegression(self):
-        
-        perf = self.perf
-        d = self.dataset
-        d = d.sort_values(by=perf) # Sort it by perf to get threshold values
-        thresholds = [d[perf].iloc[i * d.shape[0]//self.nbThresholds] for i in range(1, self.nbThresholds)]
-        
-        if not self.percentageThresholds == None:
-            thresholds=[d[perf].quantile(th) for th in self.percentageThresholds]
-
-        res = {"sr":[],"t":[],"TN":[],"TP":[],"FN":[],"FP":[],"MSE":[],"MAE":[]}
-        #for sr in range(1,99):
-        for sr in range(self.minSampleSize, self.maxSampleSize, self.paceSampleSize):
-            for t in thresholds:
-                #print("Computing for sr=%d and t=%.3f..." % (sr, t))
-
-                shuffle_split = StratifiedShuffleSplit(train_size=sr, n_splits=self.nbFolds)
-
-                d["label"] = 0
-                d.loc[d[perf] > t, "label"] = 1
-
-                TN = TP = FN = FP = MAE = MSE = 0 # Counters for classification results
-
-                c = tree.DecisionTreeRegressor(**self.hyperparams)
-                
-                try:
-                    for train_index, test_index in shuffle_split.split(d,d.label):
-                        c.fit(d.drop([perf,"label"],axis=1).iloc[train_index], d[perf].iloc[train_index])
-                        pred = c.predict(d.drop([perf,"label"],axis=1).iloc[test_index])
-
-                        dfTest = pd.DataFrame()
-                        dfTest[perf] = d[perf].iloc[test_index]
-                        dfTest["pred"] = pred
-                        dfTest["label"] = d.label.iloc[test_index]
-                        dfTest["label_pred"] = 0
-                        dfTest.loc[dfTest["pred"] > t, "label_pred"] = 1
-
-                        MSE += mse(dfTest[perf],dfTest["pred"])
-                        MAE += mae(dfTest[perf],dfTest["pred"])
-                        
-                        TN += dfTest[(dfTest.label == 0) & (dfTest.label_pred == 0)].shape[0]
-                        TP += dfTest[(dfTest.label == 1) & (dfTest.label_pred == 1)].shape[0]
-                        FN += dfTest[(dfTest.label == 1) & (dfTest.label_pred == 0)].shape[0]
-                        FP += dfTest[(dfTest.label == 0) & (dfTest.label_pred == 1)].shape[0]
-
-
-                except Exception as e:
-                    print(e)
-                    break
-                    break
-
-                res["sr"].append(sr)
-                res["t"].append(t)
-                res["MSE"].append(MSE/self.nbFolds)
-                res["MAE"].append(MAE/self.nbFolds)
-                res["TN"].append(TN/self.nbFolds)
-                res["TP"].append(TP/self.nbFolds)
-                res["FN"].append(FN/self.nbFolds)
-                res["FP"].append(FP/self.nbFolds)
-
-                #break
-            #break
-        
-        self.dfResults = pd.DataFrame(res)
         
         
     def _mlMultiClassification(self, nbClasses):
@@ -379,6 +417,7 @@ class MLSpec:
         result = {}
         
         result["Accuracy"] = (self.dfResults["TP"].mean()+self.dfResults["TN"].mean())/(self.dfResults["TP"].mean()+self.dfResults["TN"].mean()+self.dfResults["FP"].mean()+self.dfResults["FN"].mean())
+        result["BalancedAccuracy"] = (self.dfResults["TP"].mean()/(self.dfResults["TP"].mean()+self.dfResults["FN"].mean()) + self.dfResults["TN"].mean()/(self.dfResults["TN"].mean()+self.dfResults["FP"].mean()))/2
         result["Precision"] = (self.dfResults["TP"].mean())/(self.dfResults["TP"].mean()+self.dfResults["FP"].mean())
         result["Recall"] = (self.dfResults["TP"].mean())/(self.dfResults["TP"].mean()+self.dfResults["FN"].mean())
         result["Specificity"] = (self.dfResults["TN"].mean())/(self.dfResults["TN"].mean()+self.dfResults["FP"].mean())
@@ -392,9 +431,9 @@ class MLSpec:
         return self.result
     
     def start(self):
-        if self.learningType == "classification":
+        if self.learningType == "classification" or self.learningType == "gbClassification":
             self._mlClassification()
-        elif self.learningType == "regression":
+        elif self.learningType == "regression" or self.learningType == "gbRegression":
             self._mlRegression()
         elif self.learningType.startswith("multiclass-"):
             self._mlMultiClassification(self.learningType.split("-")[1])
